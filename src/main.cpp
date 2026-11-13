@@ -99,7 +99,8 @@ struct Device {
 static Device current;               // device we connect to (saved choice or the only one in range)
 static std::vector<Device> found;    // devices seen since the scan started
 static int cursor = 0;               // highlighted row on the picker
-static bool cursorMoved = false;     // user has moved the cursor since the picker opened
+static bool cursorMoved = false;     // user has tapped a row since the picker opened
+static bool pickedFromLink = false;  // picker opened over a working link, which is kept up
 static Preferences prefs;
 
 static void loadPreferred() {
@@ -448,12 +449,10 @@ static Input takeInput() {
   Serial.printf("[touch] %s at %d,%d\n", kinds[e.kind], e.x, e.y);
   if (e.kind == TouchEvent::Swipe) {  // swipe opens the station picker
     in.kind = Input::Menu;
-  } else if (e.kind == TouchEvent::Long) {
-    // a hold does nothing (it only cancels the tap)
   } else if (state == State::Select) {
-    in.index = hitRow(e.x, e.y);
+    if (e.kind == TouchEvent::Tap) in.index = hitRow(e.x, e.y);
     if (in.index >= 0) in.kind = Input::Choose;
-  } else if (hitAC(e.x, e.y)) {
+  } else if (hitAC(e.x, e.y)) {  // tap or hold
     in.kind = Input::ToggleAC;
   }
   return in;
@@ -625,17 +624,39 @@ static bool drainAdverts() {
 // Show the picker. rescan=false keeps the scan (and list) already in progress.
 static void enterSelect(bool rescan) {
   Serial.println("[ui] device picker");
-  dropLink();
+  // Keep a working link up so swiping back (or picking the same station) is
+  // instant; anything half-done (connecting, handshaking) is dropped.
+  pickedFromLink = state == State::Poll && client && client->isConnected();
+  if (!pickedFromLink) dropLink();
   cursor = 0;
   cursorMoved = false;
   if (rescan) startScan();
+  // A connected station stops advertising, so the scan won't find it: list it.
+  if (pickedFromLink && findDevice(current.addr) < 0) found.push_back(current);
   setState(State::Select);
   for (size_t i = 0; i < found.size(); i++)
     if (found[i].addr == current.addr) cursor = i;
   render();
 }
 
+// Leave the picker for the station we were on, as we left it.
+static void leaveSelect() {
+  stopScan();
+  if (pickedFromLink && client && client->isConnected()) {
+    Serial.println("[ui] back to the station");
+    setState(State::Poll);
+    render();
+  } else {
+    setState(State::Connect);  // the link went down meanwhile (or was never up): reconnect
+  }
+}
+
 static void choose(const Device &d, bool save) {
+  if (d.addr == current.addr && pickedFromLink && client && client->isConnected()) {
+    leaveSelect();
+    return;
+  }
+  dropLink();
   stopScan();
   if (d.addr != current.addr) status = Status();  // don't show the old station's numbers
   current = d;
@@ -850,13 +871,15 @@ void loop() {
     case State::Select: {
       bool changed = drainAdverts();
       Input in = takeInput();
-      if (in.kind == Input::Menu && !found.empty()) {
-        cursor = (cursor + 1) % found.size();
-        cursorMoved = true;
-        changed = true;
+      if (in.kind == Input::Menu) {  // swipe or BOOT: back, unchanged
+        if (current.valid()) {
+          leaveSelect();
+          break;
+        }
       }
       if (in.kind == Input::Choose && in.index < (int)found.size()) {
         cursor = in.index;
+        cursorMoved = true;
         render();  // show the tapped row highlighted while connecting
         choose(found[in.index], true);
         break;

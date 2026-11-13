@@ -24,10 +24,10 @@ The station is polled every 5 seconds. On each new reading a faint highlight swe
 
 | Action | What happens |
 | --- | --- |
-| Tap **AC** | Turns the AC inverter on or off. The button lights as soon as your finger lands and flips on release; the station confirms in the background. |
-| Swipe anywhere | Opens the station picker. Holding a finger still does nothing. |
+| Tap or hold **AC** | Turns the AC inverter on or off. The button lights as soon as your finger lands, then flips when you let go, or after 0.8 s if you keep holding. The station confirms in the background. |
+| Swipe anywhere | Opens the station picker. Swipe again to go back to the same station, still connected. |
 | Tap a station in the picker | Connects to it and remembers it across restarts. |
-| **BOOT** button | Same as a swipe: opens the picker. |
+| **BOOT** button | Same as a swipe: opens or closes the picker. |
 
 DC switching is deliberately left out, because the controller is meant to be powered from the station's own DC output.
 
