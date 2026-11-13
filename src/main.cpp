@@ -4,7 +4,7 @@
 // chosen yet, shows a picker; the choice is saved to flash.
 //
 // Runs on the Waveshare ESP32-S3-Touch-LCD-3.5 (320x480 portrait LCD, touch).
-// Tap AC to toggle it; swipe, hold or press BOOT to open the station picker.
+// Tap AC to toggle it; swipe or press BOOT to open the station picker.
 
 #include <Arduino.h>
 #include <NimBLEDevice.h>
@@ -446,8 +446,10 @@ static Input takeInput() {
   }
   static const char *kinds[] = {"tap", "hold", "swipe"};
   Serial.printf("[touch] %s at %d,%d\n", kinds[e.kind], e.x, e.y);
-  if (e.kind != TouchEvent::Tap) {  // swipe (or hold) opens the station picker
+  if (e.kind == TouchEvent::Swipe) {  // swipe opens the station picker
     in.kind = Input::Menu;
+  } else if (e.kind == TouchEvent::Long) {
+    // a hold does nothing (it only cancels the tap)
   } else if (state == State::Select) {
     in.index = hitRow(e.x, e.y);
     if (in.index >= 0) in.kind = Input::Choose;
@@ -767,14 +769,14 @@ void setup() {
 // Debug over serial: 'S' dumps the screen as raw RGB565, 'D' drops the BLE link,
 // 'P' + 3 digits previews a charge level (e.g. P042) until the next poll,
 // 'B' presses BOOT, 'F' forgets the saved device and reboots,
-// 'X' + 6 digits taps at x,y (e.g. X100080), 'L' long-presses.
+// 'X' + 6 digits taps at x,y (e.g. X100080), 'W' swipes.
 static void handleSerial() {
   while (Serial.available()) {
     int c = Serial.read();
     if (c == 'D' && client && client->isConnected()) client->disconnect();  // test reconnect UI
     if (c == 'B') bootSimulated = true;
-    if (c == 'L') {
-      simTouch = {TouchEvent::Long, (int16_t)(canvas.width() / 2), (int16_t)(canvas.height() / 2), millis()};
+    if (c == 'W') {
+      simTouch = {TouchEvent::Swipe, (int16_t)(canvas.width() / 2), (int16_t)(canvas.height() / 2), millis()};
       lastActivity = millis();
       simTouchPending = true;
     }

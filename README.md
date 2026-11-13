@@ -25,7 +25,7 @@ The station is polled every 5 seconds. On each new reading a faint highlight swe
 | Action | What happens |
 | --- | --- |
 | Tap **AC** | Turns the AC inverter on or off. The button lights as soon as your finger lands and flips on release; the station confirms in the background. |
-| Swipe, or hold anywhere | Opens the station picker. |
+| Swipe anywhere | Opens the station picker. Holding a finger still does nothing. |
 | Tap a station in the picker | Connects to it and remembers it across restarts. |
 | **BOOT** button | Same as a swipe: opens the picker. |
 
@@ -74,7 +74,7 @@ Send these single characters over the serial monitor:
 | `P042` | Preview a charge level (here 42%) until the next poll |
 | `B` | Press BOOT |
 | `X100080` | Tap at x=100, y=080 |
-| `L` | Long-press |
+| `W` | Swipe |
 | `F` | Forget the saved station and reboot |
 
 ## How it works
