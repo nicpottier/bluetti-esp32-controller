@@ -282,6 +282,7 @@ static void renderSelect() {
   int n = found.size();
   box(MARGIN, 10, W - MARGIN, 36, RADIUS, n ? L_FRAME : L_WARN);
   text(n ? "SELECT STATION" : "SEARCHING", 26, 30, fHdr, TFT_BLACK, baseline_left);
+  text("V" FW_VERSION, W - MARGIN - 16, 30, fHdr, TFT_BLACK, baseline_right);
   int first = pickerFirst();
   for (int r = 0; r < ROWS && first + r < n; r++) {
     int i = first + r;

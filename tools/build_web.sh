@@ -19,6 +19,6 @@ esptool.py --chip esp32s3 merge_bin -o _site/firmware.bin \
   0x0 "$B/bootloader.bin" 0x8000 "$B/partitions.bin" 0xe000 "$BOOT_APP0" 0x10000 "$B/firmware.bin"
 
 # Stamp the version (short commit) into the manifest so the page shows what it installs.
-VERSION="${VERSION:-$(git rev-parse --short HEAD)}"
+VERSION="${VERSION:-$(git describe --tags --always --dirty --match "v[0-9]*")}"
 sed -i.bak "s/__VERSION__/$VERSION/" _site/manifest.json _site/index.html && rm _site/*.bak
 echo "Site ready in _site/ (version $VERSION)"

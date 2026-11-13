@@ -756,7 +756,7 @@ void setup() {
   Serial.begin(115200);
   uint32_t t0 = millis();
   while (!Serial && millis() - t0 < 3000) delay(10);
-  Serial.println("\nBLUETTI controller");
+  Serial.println("\nBLUETTI controller " FW_BUILD);
   loadPreferred();
   if (current.valid())
     Serial.printf("preferred device: %s (%s)\n", current.addr.c_str(), current.name.c_str());

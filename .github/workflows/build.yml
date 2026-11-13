@@ -1,0 +1,75 @@
+# Every push to main: build the firmware (a compile check; the image is kept as
+# a workflow artifact). Every v* tag: also publish a GitHub release with the
+# image attached and update the browser flasher on GitHub Pages, so the
+# flasher always installs the latest release.
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # tags, for the version number
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-${{ hashFiles('platformio.ini') }}
+      - run: pip install platformio esptool
+      - run: tools/build_web.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: _site/firmware.bin
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: firmware
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          cp firmware.bin "bluetti-esp32-controller-$TAG.bin"
+          gh release create "$TAG" "bluetti-esp32-controller-$TAG.bin" \
+            --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes \
+            --notes "Flash it from your browser: https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/ , or write the .bin at offset 0x0 with esptool."
+
+  pages:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

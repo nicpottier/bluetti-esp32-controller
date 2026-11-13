@@ -65,9 +65,20 @@ Then open the serial monitor at 115200 baud to watch it scan, connect and poll:
 pio device monitor
 ```
 
-### The web flasher
+### Releases and the web flasher
 
-`tools/build_web.sh` builds the firmware, merges the bootloader, partition table and app into one image, and assembles the flasher site (`web/` plus the screenshots) in `_site/`. The GitHub Actions workflow in `.github/workflows/pages.yml` runs it on every push to `main` and publishes the result to GitHub Pages. The flasher itself is [ESP Web Tools](https://esphome.github.io/esp-web-tools/).
+Releases are git tags named `vMAJOR.MINOR.PATCH`. The firmware takes its version from git when it's built: a build exactly on a tag shows e.g. `V1.2.0` in the corner of the station picker, anything else shows `V1.2.0-DEV`. The serial console prints the full `git describe` at boot.
+
+To cut a release:
+
+```bash
+git tag v1.2.0
+git push origin v1.2.0
+```
+
+The workflow in `.github/workflows/build.yml` then builds the firmware, publishes a GitHub release with the image attached, and updates the browser flasher, so the flasher always installs the latest release. Pushes to `main` only build, as a compile check.
+
+`tools/build_web.sh` does the build locally: it merges the bootloader, partition table and app into one image and assembles the flasher site (`web/` plus the screenshots) in `_site/`. The flasher itself is [ESP Web Tools](https://esphome.github.io/esp-web-tools/).
 
 ### Serial debug commands
 
@@ -104,6 +115,7 @@ tools/
   make_vlw.py         TTF → smooth-font bitmaps for src/fonts.h
   mock_rect.py        desktop mockup of the UI
   build_web.sh        builds the browser flasher site
+  version.py          stamps the git version into the build
 web/                  flasher page and ESP Web Tools manifest
 fonts/                Antonio and its licence
 docs/                 screenshots
