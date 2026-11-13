@@ -4,3 +4,5 @@ __pycache__/
 .DS_Store
 # BLUETTI's own app, kept locally for reference only
 *.apk
+_site/
+.claude/

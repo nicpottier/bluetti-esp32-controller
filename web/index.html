@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bluetti ESP32 Controller</title>
+  <meta name="description" content="Flash the Bluetti ESP32 Controller firmware onto a Waveshare ESP32-S3-Touch-LCD-3.5 from your browser.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Antonio:wght@500;700&family=Inter:wght@400;600&display=swap" rel="stylesheet">
+  <script type="module" src="https://unpkg.com/esp-web-tools@10.4.0/dist/web/install-button.js?module"></script>
+  <style>
+    :root {
+      --bg: #000;
+      --panel: #11151c;
+      --text: #e8ecf2;
+      --muted: #8d97a8;
+      --amber: #f9a11b;
+      --slate: #34404f;
+      --green: #7ccf6b;
+      --red: #e8636b;
+      --radius: 13px;
+      color-scheme: dark;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 16px/1.55 Inter, system-ui, sans-serif;
+    }
+    main { max-width: 860px; margin: 0 auto; padding: 24px 16px 64px; }
+    .bar {
+      background: var(--amber);
+      color: #000;
+      border-radius: var(--radius);
+      padding: 6px 18px;
+      font: 700 15px/1.4 Antonio, sans-serif;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      display: flex;
+      justify-content: space-between;
+    }
+    .bar.slate { background: var(--slate); color: var(--text); }
+    h1 {
+      font: 700 clamp(40px, 9vw, 68px)/1 Antonio, sans-serif;
+      text-transform: uppercase;
+      margin: 28px 0 10px;
+      letter-spacing: .01em;
+    }
+    h2 {
+      font: 700 22px/1.2 Antonio, sans-serif;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      color: var(--amber);
+      margin: 40px 0 10px;
+    }
+    p.lede { color: var(--muted); font-size: 18px; max-width: 60ch; margin: 0 0 28px; }
+    .hero { display: grid; grid-template-columns: 1fr auto; gap: 32px; align-items: center; }
+    .shots { display: flex; gap: 12px; }
+    .shots img { width: 160px; border-radius: 10px; border: 1px solid #222a35; display: block; }
+    .install {
+      background: var(--panel);
+      border-radius: var(--radius);
+      padding: 24px;
+      margin-top: 8px;
+    }
+    esp-web-install-button button[slot="activate"] {
+      background: var(--amber);
+      color: #000;
+      border: 0;
+      border-radius: var(--radius);
+      padding: 14px 28px;
+      font: 700 22px/1 Antonio, sans-serif;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      cursor: pointer;
+    }
+    esp-web-install-button button[slot="activate"]:hover { filter: brightness(1.1); }
+    .note { color: var(--muted); font-size: 14px; margin: 14px 0 0; }
+    .warn { color: var(--red); margin: 0; }
+    ol { padding-left: 1.3em; margin: 0; }
+    ol li { margin: 6px 0; }
+    a { color: var(--amber); }
+    code { background: #1b212b; padding: 1px 6px; border-radius: 5px; font-size: .92em; }
+    footer { margin-top: 48px; }
+    @media (max-width: 640px) {
+      .hero { grid-template-columns: 1fr; }
+      .shots img { width: calc(50vw - 22px); }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <div class="bar"><span>Bluetti ESP32 Controller</span><span>Web installer</span></div>
+
+  <div class="hero">
+    <div>
+      <h1>Flash it from your browser</h1>
+      <p class="lede">A touch screen for your BLUETTI power station: charge, time remaining, power in and out, and an AC switch. It talks to the station over Bluetooth, with no app or Wi-Fi.</p>
+    </div>
+    <div class="shots">
+      <img src="status.png" alt="Status screen showing 64% charge">
+      <img src="picker.png" alt="Station picker">
+    </div>
+  </div>
+
+  <div class="install">
+    <esp-web-install-button manifest="manifest.json">
+      <button slot="activate">Connect &amp; install</button>
+      <p slot="unsupported" class="warn">Your browser can't talk to USB devices. Open this page in desktop Chrome or Edge.</p>
+      <p slot="not-allowed" class="warn">USB access needs a secure page (https).</p>
+    </esp-web-install-button>
+    <p class="note">Firmware version <code>__VERSION__</code>, built from the latest code on GitHub.</p>
+  </div>
+
+  <h2>What you need</h2>
+  <ol>
+    <li>A <a href="https://www.waveshare.com/wiki/ESP32-S3-Touch-LCD-3.5">Waveshare ESP32-S3-Touch-LCD-3.5</a> (SPI version).</li>
+    <li>A USB-C data cable (some cables only charge).</li>
+    <li>Desktop Chrome or Edge.</li>
+  </ol>
+
+  <h2>Installing</h2>
+  <ol>
+    <li>Plug the board into this computer.</li>
+    <li>Press <b>Connect &amp; install</b> and pick the board's USB port (it usually mentions "USB JTAG" or "ESP32").</li>
+    <li>Choose whether to erase the device. Erasing forgets the saved station; leave it off when updating.</li>
+    <li>Wait about a minute. The board restarts on its own when done.</li>
+  </ol>
+  <p class="note">No port shows up? Unplug the board, hold its BOOT button while plugging it back in, then try again.</p>
+
+  <h2>First run</h2>
+  <p>The board looks for stations nearby. With one in range it connects straight away; with several, tap yours in the list and it remembers it. Tap <b>AC</b> to switch the inverter, swipe to change stations.</p>
+
+  <footer>
+    <div class="bar slate"><span><a style="color:inherit" href="https://github.com/nicpottier/bluetti-esp32-controller">Source on GitHub</a></span><span>Unofficial, not affiliated with BLUETTI</span></div>
+  </footer>
+</main>
+</body>
+</html>

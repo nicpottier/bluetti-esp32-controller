@@ -10,6 +10,8 @@ A small touch screen that sits next to a BLUETTI power station and shows what it
 
 > Unofficial project, not affiliated with or endorsed by BLUETTI.
 
+**[Flash it from your browser →](https://nicpottier.github.io/bluetti-esp32-controller/)** Plug the board in over USB, open the page in desktop Chrome or Edge, press *Connect & install*. No tools to install.
+
 ## What it shows
 
 - **Charge**: a big percentage plus a segmented bar along the top. The colour runs from rose through amber to green as the battery fills.
@@ -51,7 +53,7 @@ Other stations that use BLUETTI's newer encrypted protocol (V2 registers) will p
 
 ## Building
 
-Uses [PlatformIO](https://platformio.org/).
+To build it yourself you'll need [PlatformIO](https://platformio.org/).
 
 ```bash
 pio run -t upload
@@ -62,6 +64,10 @@ Then open the serial monitor at 115200 baud to watch it scan, connect and poll:
 ```bash
 pio device monitor
 ```
+
+### The web flasher
+
+`tools/build_web.sh` builds the firmware, merges the bootloader, partition table and app into one image, and assembles the flasher site (`web/` plus the screenshots) in `_site/`. The GitHub Actions workflow in `.github/workflows/pages.yml` runs it on every push to `main` and publishes the result to GitHub Pages. The flasher itself is [ESP Web Tools](https://esphome.github.io/esp-web-tools/).
 
 ### Serial debug commands
 
@@ -97,6 +103,8 @@ src/
 tools/
   make_vlw.py         TTF → smooth-font bitmaps for src/fonts.h
   mock_rect.py        desktop mockup of the UI
+  build_web.sh        builds the browser flasher site
+web/                  flasher page and ESP Web Tools manifest
 fonts/                Antonio and its licence
 docs/                 screenshots
 ```
