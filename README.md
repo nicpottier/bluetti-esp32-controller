@@ -51,6 +51,15 @@ If only one station is in range it connects automatically. With several in range
 - [Waveshare ESP32-S3-Touch-LCD-3.5](https://www.waveshare.com/wiki/ESP32-S3-Touch-LCD-3.5) (the SPI version): ESP32-S3R8, 16 MB flash, 8 MB PSRAM, 320×480 ST7796 IPS panel, FT6336 capacitive touch.
 - A USB-C cable, plugged into the station's USB or DC output for permanent power.
 
+### Case
+
+`case/` has a 3D-printable case for mounting the board on a panel with a Velcro patch: an OpenSCAD source (`case.scad`), ready-made STLs and preview renders. Two parts:
+
+- **Bezel:** the front and sides, held to the plate by four flexing latches in its long walls. Print it face down.
+- **Plate:** the back, with a 2 × 1 inch recess for the Velcro and a U-shaped opening for a right-angle USB-C adapter. Print it back down.
+
+To fit it, drop the board face down into the bezel and press the plate in until all four latches click. To open it, lever each latch's hook out with a small screwdriver through its notch in the back. Board dimensions marked "est." in `case.scad` were scaled from Waveshare's drawing.
+
 ### Supported stations
 
 | Station | Status |
