@@ -27,13 +27,22 @@ The station is polled every 5 seconds. On each new reading a faint highlight swe
 | Action | What happens |
 | --- | --- |
 | Tap or hold **AC** | Turns the AC inverter on or off. The button lights as soon as your finger lands, then flips when you let go, or after 0.8 s if you keep holding. The station confirms in the background. |
-| Swipe anywhere | Opens the station picker. Swipe again to go back to the same station, still connected. |
+| Swipe right | Opens the station picker. Swipe left to go back to the same station, still connected. |
+| Swipe left | Opens the settings page. Swipe right to go back. |
 | Tap a station in the picker | Connects to it and remembers it across restarts. |
-| **BOOT** button | Same as a swipe: opens or closes the picker. |
+| Tap a setting | Steps it to the next value. Settings are saved across restarts. |
+| **BOOT** button, or an up/down swipe | Opens or closes the picker, or closes the settings page. |
+
+### Settings
+
+- **Screen timeout:** how long the screen stays lit without a touch: 15 s, 30 s (the default), 1, 2, 5 or 10 minutes, or never.
+- **Timeout while charging:** used instead while the station is taking in more power than it's putting out. Default 30 s.
+- **Timeout while AC is on:** used instead while the AC inverter is on. Default never, so the screen stays lit. If the station is charging with AC on, the longer of the two applies.
+- **Orientation:** normal or flipped. Flipped turns the screen (and touch) round 180°, for mounting the board with its USB port at the top.
 
 DC switching is deliberately left out, because the controller is meant to be powered from the station's own DC output.
 
-**Screen dimming:** while AC is on the screen stays lit. With AC off it fades out after 30 seconds without a touch. A touch on the dark screen only fades it back in; it isn't treated as a tap.
+**Screen dimming:** the screen fades out after the screen timeout without a touch (by default 30 seconds, and never while AC is on; see Settings). A touch on the dark screen only fades it back in; it isn't treated as a tap.
 
 If only one station is in range it connects automatically. With several in range and none saved, the picker opens.
 
@@ -91,11 +100,15 @@ Send these single characters over the serial monitor:
 | `P042` | Preview a charge level (here 42%) until the next poll |
 | `B` | Press BOOT |
 | `X100080` | Tap at x=100, y=080 |
-| `W` | Swipe |
-| `F` | Forget the saved station and reboot |
+| `W` | Swipe right (picker) |
+| `L` | Swipe left (settings) |
+| `F` | Forget the saved station and reboot (settings are kept) |
+| `I` | List the devices on the I2C bus |
+| `T0` / `T1` | Show sample readings, discharging / charging, until the next poll |
 
 ## How it works
 
+- **Tasks:** the Bluetooth side (scanning, connecting, the handshake, polling) runs in its own task on core 0, beside the NimBLE host, while `loop()` on core 1 handles input and drawing. A slow connect or a poll waiting on the station never freezes the screen, and opening the picker cancels a connect attempt in progress.
 - **Bluetooth:** [NimBLE-Arduino](https://github.com/h2zero/NimBLE-Arduino). The station advertises as e.g. `EL300<serial>`. Newer BLUETTI firmware encrypts the link: an ECDH key exchange signed with keys from the official app, then AES on every message (`src/bluetti_crypto.cpp`). After that it's Modbus-style register reads and writes; register 2011 switches the AC inverter.
 - **Display:** [LovyanGFX](https://github.com/lovyan03/LovyanGFX), drawing into a PSRAM sprite and pushing it to the panel. Small updates (the charge-bar sweep, the pressed AC button) push only their own strip of the screen.
 - **Touch:** the FT6336's interrupt line goes to an I/O expander rather than a GPIO, so a small task polls it and turns touches into tap, hold and swipe events.

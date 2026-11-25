@@ -4,7 +4,12 @@
 // chosen yet, shows a picker; the choice is saved to flash.
 //
 // Runs on the Waveshare ESP32-S3-Touch-LCD-3.5 (320x480 portrait LCD, touch).
-// Tap AC to toggle it; swipe or press BOOT to open the station picker.
+// Two tasks: the Bluetooth side (scan, connect, handshake, poll) runs in its own
+// task on core 0, next to the NimBLE host, so its long waits never hold up the
+// screen. loop() on core 1 is the UI: input, drawing and the screen fading. The
+// UI sends the Bluetooth task commands; the Bluetooth task asks for redraws.
+// Tap AC to toggle it. Swipe right (or press BOOT) for the station picker, swipe
+// left for settings: screen timeout and a 180 degree flip.
 
 #include <Arduino.h>
 #include <NimBLEDevice.h>
@@ -45,8 +50,26 @@ static void onNotify(NimBLERemoteCharacteristic *, uint8_t *data, size_t len, bo
 
 // ---- state ----
 enum class State { Scan, Select, Connect, Handshake, Poll };
-static State state = State::Scan;
-static void waitTick();  // UI upkeep pumped while waiting on the station
+static volatile State state = State::Scan;
+static void waitTick();  // upkeep pumped while waiting on the station
+
+// Shared between the Bluetooth task and the UI: the station list, the current
+// station, the readings and the status message. Hold this while changing them
+// (Bluetooth task) or drawing them (UI). Recursive, so helpers can nest.
+static SemaphoreHandle_t dataLock;
+struct Lock {
+  bool held = true;
+  Lock() { xSemaphoreTakeRecursive(dataLock, portMAX_DELAY); }
+  ~Lock() { release(); }
+  void release() {
+    if (held) xSemaphoreGiveRecursive(dataLock);
+    held = false;
+  }
+};
+static volatile bool needRender = true;    // set by the Bluetooth task; the UI redraws
+static volatile bool needSweep = false;    // fresh charge reading: run the highlight
+static volatile bool pickerOpen = false;   // station picker showing
+static void requestRender() { needRender = true; }
 static NimBLEClient *client = nullptr;
 static NimBLERemoteCharacteristic *writeChr = nullptr;
 static BluettiCrypto crypto;
@@ -120,10 +143,51 @@ static void savePreferred(const Device &d) {
 }
 
 static void forgetPreferred() {
+  Lock l;
   prefs.begin("bluetti", false);
   prefs.clear();
   prefs.end();
   current = Device();
+}
+
+// ---- settings, kept in their own namespace so forgetting the station keeps them ----
+struct Timeout {
+  uint32_t ms;  // 0 = never
+  const char *label;
+};
+static const Timeout TIMEOUTS[] = {{15000, "15 SEC"}, {30000, "30 SEC"}, {60000, "1 MIN"}, {120000, "2 MIN"},
+                                   {300000, "5 MIN"}, {600000, "10 MIN"}, {0, "NEVER"}};
+static const int N_TIMEOUTS = sizeof(TIMEOUTS) / sizeof(TIMEOUTS[0]);
+static const int DEFAULT_TIMEOUT = 1;  // 30 s
+static const int NEVER = N_TIMEOUTS - 1;
+// Three screen timeouts, indexes into TIMEOUTS: the usual one, and ones that
+// apply instead while the station is charging or its AC is on. The defaults
+// keep the old behaviour: 30 s, except never while AC is on.
+struct Settings {
+  int timeout = DEFAULT_TIMEOUT;
+  int chargeTimeout = DEFAULT_TIMEOUT;
+  int acTimeout = NEVER;
+  bool flip = false;  // screen turned 180 degrees
+};
+static Settings settings;
+static bool settingsOpen = false;  // settings page showing (over the status screen)
+
+static void loadSettings() {
+  prefs.begin("settings", false);
+  settings.timeout = constrain(prefs.getUChar("timeout", DEFAULT_TIMEOUT), 0, N_TIMEOUTS - 1);
+  settings.chargeTimeout = constrain(prefs.getUChar("chgTimeout", DEFAULT_TIMEOUT), 0, N_TIMEOUTS - 1);
+  settings.acTimeout = constrain(prefs.getUChar("acTimeout", NEVER), 0, N_TIMEOUTS - 1);
+  settings.flip = prefs.getBool("flip", false);
+  prefs.end();
+}
+
+static void saveSettings() {
+  prefs.begin("settings", false);
+  prefs.putUChar("timeout", settings.timeout);
+  prefs.putUChar("chgTimeout", settings.chargeTimeout);
+  prefs.putUChar("acTimeout", settings.acTimeout);
+  prefs.putBool("flip", settings.flip);
+  prefs.end();
 }
 
 // "EL3001234567890123" -> "ELITE 300", "Handsfree 19876543210987" -> "HANDSFREE 1".
@@ -159,6 +223,7 @@ static String deviceLabel(const Device &d) {
 static void setState(State s) {
   state = s;
   stateSince = millis();
+  requestRender();
 }
 
 static String hex(const uint8_t *p, size_t n) {
@@ -322,17 +387,22 @@ static String connMsg = "Starting...";
 static Display lcd;
 static LGFX_Sprite canvas(&lcd);  // each screen is drawn here, then pushed in one go
 
-// Split remaining time into value + unit: "9.9" "Days" above 24 h, else "5.4" "Hours".
+// Split remaining time into value + unit, rounded to a whole number: minutes
+// under three hours, hours under a day, then days. "95" "Minutes", "6" "Hours".
 static void remainingParts(uint16_t minutes, String &value, String &unit) {
-  char buf[12];
-  if (minutes >= 24 * 60) {
-    snprintf(buf, sizeof(buf), "%.1f", minutes / 1440.0f);
-    unit = "Days";
+  long n;
+  if (minutes < 3 * 60) {
+    n = minutes;
+    unit = "Minute";
+  } else if (minutes < 24 * 60 - 30) {  // anything that rounds to 24 h shows as a day
+    n = lround(minutes / 60.0);
+    unit = "Hour";
   } else {
-    snprintf(buf, sizeof(buf), "%.1f", minutes / 60.0f);
-    unit = "Hours";
+    n = lround(minutes / 1440.0);
+    unit = "Day";
   }
-  value = buf;
+  if (n != 1) unit += "s";
+  value = String(n);
 }
 
 static String formatRemaining(uint16_t minutes) {
@@ -346,11 +416,12 @@ static String formatRemaining(uint16_t minutes) {
 static Touch touch;
 
 // ---- input ----
-// Touch and the BOOT button become one of these. Menu: open the picker (or move
-// to the next station on it). ToggleAC: tap on the AC button. Choose: tap on
-// picker row `index`.
+// Touch and the BOOT button become one of these. Menu: BOOT or an up / down
+// swipe, opens or closes the picker (or closes settings). Left / Right: swipes,
+// which move between the pages: picker | status | settings. ToggleAC: tap on the
+// AC button. Choose: tap on picker row `index`. Setting: tap on settings row `index`.
 struct Input {
-  enum Kind { None, Menu, ToggleAC, Choose } kind = None;
+  enum Kind { None, Menu, Left, Right, ToggleAC, Choose, Setting } kind = None;
   int index = -1;
 };
 
@@ -358,10 +429,10 @@ static TouchEvent simTouch;  // touch injected over serial (debug)
 static bool simTouchPending = false;
 
 // ---- screen fading ----
-// With AC on the screen stays lit. Otherwise it fades out after 30 s without
-// input. The first touch or press while it is fading or dark only brings it back.
-// A small task does the fading, so it stays smooth while loop() waits on BLE.
-static const uint32_t OFF_AFTER_MS = 30000;
+// With AC on the screen stays lit. Otherwise it fades out after the timeout set
+// on the settings page (30 s unless changed) without input. The first touch or
+// press while it is fading or dark only brings it back. A small task does the
+// fading.
 static const uint32_t FADE_OUT_MS = 1500, FADE_IN_MS = 300;
 static const uint8_t BRIGHT_ON = 160;  // backlight, 0-255
 
@@ -372,8 +443,8 @@ static uint32_t wakeDown = 0;  // finger-down that woke the screen; its gesture 
 
 static void fadeTask(void *) {
   const uint32_t stepMs = 15;
-  float level = 1;  // 0..1, the setup brightness
-  uint8_t applied = BRIGHT_ON;
+  float level = 0;  // 0..1; starts dark, so the first frame fades in at power-up
+  uint8_t applied = 0;
   for (;;) {
     float target = screenOn ? 1 : 0;
     if (level != target) {
@@ -396,6 +467,19 @@ static void setScreen(bool on) {
   screenOn = on;
 }
 
+// The timeout that applies now, in ms (0 = never). While the station is charging
+// or its AC is on, that setting replaces the usual one; with both, the longer.
+static uint32_t screenTimeout() {
+  bool live = state == State::Poll && status.valid;
+  bool acOn = live && status.acOn == 1;
+  bool charging = live && status.acIn + status.dcIn > status.acOut + status.dcOut;
+  uint32_t ac = TIMEOUTS[settings.acTimeout].ms, chg = TIMEOUTS[settings.chargeTimeout].ms;
+  if (acOn && charging) return (!ac || !chg) ? 0 : max(ac, chg);
+  if (acOn) return ac;
+  if (charging) return chg;
+  return TIMEOUTS[settings.timeout].ms;
+}
+
 // Called every loop: notices input as soon as it starts (a finger landing, BOOT
 // going down) and picks the target. Input that wakes a dark screen is dropped.
 static void updateScreen() {
@@ -412,16 +496,15 @@ static void updateScreen() {
     active = true;
   }
   if (active) lastActivity = millis();
-  bool acOn = status.valid && status.acOn == 1;
-  setScreen(acOn || millis() - lastActivity < OFF_AFTER_MS);
+  uint32_t offAfter = screenTimeout();
+  setScreen(!offAfter || millis() - lastActivity < offAfter);
 }
 
-// Light the AC button while a finger is on it, before we know it's a tap. Cheap
-// to call often; also runs inside BLE waits so a poll in flight doesn't delay it.
+// Light the AC button while a finger is on it, before we know it's a tap.
 static void pressTick() {
   int16_t x, y;
   uint32_t down;
-  bool want = state == State::Poll && screenOn && touch.held(x, y, down) && down != wakeDown && hitAC(x, y) &&
+  bool want = state == State::Poll && !settingsOpen && !pickerOpen && screenOn && touch.held(x, y, down) && down != wakeDown && hitAC(x, y) &&
               status.valid && status.acOn >= 0;
   if (want == acPressed) return;
   acPressed = want;
@@ -447,26 +530,26 @@ static Input takeInput() {
   }
   static const char *kinds[] = {"tap", "hold", "swipe"};
   Serial.printf("[touch] %s at %d,%d\n", kinds[e.kind], e.x, e.y);
-  if (e.kind == TouchEvent::Swipe) {  // swipe opens the station picker
-    in.kind = Input::Menu;
-  } else if (state == State::Select) {
+  if (e.kind == TouchEvent::Swipe) {
+    if (abs(e.dx) > abs(e.dy)) in.kind = e.dx < 0 ? Input::Left : Input::Right;
+    else in.kind = Input::Menu;
+  } else if (pickerOpen) {
+    Lock l;
     if (e.kind == TouchEvent::Tap) in.index = hitRow(e.x, e.y);
     if (in.index >= 0) in.kind = Input::Choose;
+  } else if (settingsOpen) {
+    if (e.kind == TouchEvent::Tap) in.index = hitSetting(e.x, e.y);
+    if (in.index >= 0) in.kind = Input::Setting;
   } else if (hitAC(e.x, e.y)) {  // tap or hold
     in.kind = Input::ToggleAC;
   }
   return in;
 }
 
-// Drop input that arrived while it had no meaning (e.g. during a connect).
-static void discardInput() {
-  touch.clear();
-  simTouchPending = false;
-}
-
 static void setConn(const char *msg) {
+  Lock l;
   connMsg = msg;
-  render();
+  requestRender();
 }
 
 // Disconnect and wait for the link to actually go down (disconnect() is async).
@@ -488,6 +571,7 @@ static void poll() {
   bool okB = !skip && readRegisters(140, 8, b);    // DC out, AC out, DC in, AC in power
   bool okC = !skip && readRegisters(2011, 2, c);   // AC / DC output switches (only AC is controlled; DC powers this board)
 
+  Lock l;
   Serial.printf("---------------- %s ----------------\n", deviceLabel(current).c_str());
   if (okA) {
     status.model = swapString(a, (110 - 100) * 2, 12);
@@ -526,14 +610,15 @@ static void poll() {
     Serial.println("[ble] reads keep failing, reconnecting");
     failedPolls = 0;
     connMsg = "Reconnecting...";
-    render();
+    requestRender();
+    l.release();  // dropLink() can wait a couple of seconds
     dropLink();
     setState(State::Scan);
     return;
   }
   connMsg = (okA && okB && okC) ? "Connected" : "Read error";
-  render();
-  if (okA && screenOn) startSweep();  // fresh charge reading: run the highlight along the bar
+  requestRender();
+  if (okA) needSweep = true;  // fresh charge reading: run the highlight along the bar
 }
 
 // ---- scanning / connecting ----
@@ -572,6 +657,7 @@ class ScanCB : public NimBLEAdvertisedDeviceCallbacks {
 static ScanCB scanCB;
 
 static void startScan() {
+  Lock l;
   found.clear();
   xQueueReset(advQueue);
   NimBLEScan *scan = NimBLEDevice::getScan();
@@ -596,6 +682,7 @@ static int findDevice(const String &addr) {
 
 // Merge queued adverts into `found`. Returns true if the list changed visibly.
 static bool drainAdverts() {
+  Lock l;
   bool changed = false;
   Advert a;
   while (xQueueReceive(advQueue, &a, 0) == pdTRUE) {
@@ -624,10 +711,12 @@ static bool drainAdverts() {
 // Show the picker. rescan=false keeps the scan (and list) already in progress.
 static void enterSelect(bool rescan) {
   Serial.println("[ui] device picker");
+  pickerOpen = true;
   // Keep a working link up so swiping back (or picking the same station) is
   // instant; anything half-done (connecting, handshaking) is dropped.
   pickedFromLink = state == State::Poll && client && client->isConnected();
   if (!pickedFromLink) dropLink();
+  Lock l;
   cursor = 0;
   cursorMoved = false;
   if (rescan) startScan();
@@ -636,16 +725,16 @@ static void enterSelect(bool rescan) {
   setState(State::Select);
   for (size_t i = 0; i < found.size(); i++)
     if (found[i].addr == current.addr) cursor = i;
-  render();
+  requestRender();
 }
 
 // Leave the picker for the station we were on, as we left it.
 static void leaveSelect() {
   stopScan();
+  pickerOpen = false;
   if (pickedFromLink && client && client->isConnected()) {
     Serial.println("[ui] back to the station");
     setState(State::Poll);
-    render();
   } else {
     setState(State::Connect);  // the link went down meanwhile (or was never up): reconnect
   }
@@ -658,6 +747,8 @@ static void choose(const Device &d, bool save) {
   }
   dropLink();
   stopScan();
+  Lock l;
+  pickerOpen = false;
   if (d.addr != current.addr) status = Status();  // don't show the old station's numbers
   current = d;
   if (save) {
@@ -717,21 +808,13 @@ static void slowTick() {
   if (slowSince && millis() - slowSince > SLOW_MS && connMsg != slowMsg) setConn(slowMsg);
 }
 
-static void toggleAC() {
-  if (status.acOn < 0) {
-    Serial.println("[ctrl] AC state unknown, ignoring tap");
-    return;
-  }
-  uint16_t target = status.acOn ? 0 : 1;
+// Runs in the Bluetooth task. The UI has already flipped the button (so the tap
+// feels instant) from `was` to `target`; this sends it and puts the button back
+// if the station doesn't take it. The pill only mentions the change if the
+// station is slow to echo it (see slowTick), so a normal toggle doesn't flash it.
+static void toggleAC(int target, int was) {
   const char *msg = target ? "AC turning on..." : "AC turning off...";
   Serial.printf("[ctrl] %s\n", msg);
-  // Flip the button straight away so the tap feels instant. The pill only
-  // mentions the change if the station is slow to echo it (see slowTick), so a
-  // normal toggle doesn't flash it.
-  int was = status.acOn;
-  status.acOn = target;
-  acPressed = false;
-  render();
   slowMsg = msg;
   slowSince = millis();
   bool ok = writeRegister(2011, target);
@@ -740,36 +823,176 @@ static void toggleAC() {
     if (connMsg != "Connected") setConn("Connected");  // trust the echo until the next poll
   } else {
     Serial.println("[ctrl] AC write failed");
-    status.acOn = was;  // put the button back
+    {
+      Lock l;
+      status.acOn = was;  // put the button back
+    }
     setConn("AC write failed");
   }
   // Re-read in ~1.5 s; an immediate read can still return the old state.
   lastPoll = millis() - POLL_INTERVAL_MS + 1500;
 }
 
-static void waitTick() {
-  pressTick();
-  slowTick();
+// ---- settings page ----
+static void applyFlip() {
+  lcd.setRotation(settings.flip ? 2 : 0);
+  touch.setFlip(settings.flip);
+  touch.clear();  // anything queued was measured the other way up
 }
 
+static void waitTick() { slowTick(); }
+
+// ---- commands from the UI to the Bluetooth task ----
+struct Cmd {
+  enum Kind : uint8_t { OpenPicker, ClosePicker, Choose, ToggleAC } kind;
+  int16_t a, b;  // Choose: row. ToggleAC: target, previous state
+};
+static QueueHandle_t cmdQueue;
+
+static void send(Cmd::Kind k, int a = 0, int b = 0) {
+  Cmd c{k, (int16_t)a, (int16_t)b};
+  xQueueSend(cmdQueue, &c, 0);
+}
+
+static void handleCmd(const Cmd &c) {
+  switch (c.kind) {
+    case Cmd::OpenPicker:
+      if (state != State::Select) enterSelect(true);
+      break;
+    case Cmd::ClosePicker:
+      if (state == State::Select) leaveSelect();
+      break;
+    case Cmd::Choose: {
+      if (state != State::Select) break;
+      Device d;
+      {
+        Lock l;
+        if (c.a < 0 || c.a >= (int)found.size()) break;
+        d = found[c.a];
+      }
+      choose(d, true);
+      break;
+    }
+    case Cmd::ToggleAC:
+      if (state == State::Poll) toggleAC(c.a, c.b);
+      break;
+  }
+}
+
+// Wait up to ms for a command; true (and the command left queued) if one came.
+static bool waitForCmd(uint32_t ms) {
+  Cmd c;
+  return xQueuePeek(cmdQueue, &c, pdMS_TO_TICKS(ms)) == pdTRUE;
+}
+
+// ---- UI navigation (loop(), core 1) ----
+static void openSettings(bool open) {
+  Serial.printf("[ui] settings %s\n", open ? "open" : "closed");
+  settingsOpen = open;
+  requestRender();
+}
+
+static void changeSetting(int row) {
+  if (row == SET_TIMEOUT) settings.timeout = (settings.timeout + 1) % N_TIMEOUTS;
+  if (row == SET_CHARGE) settings.chargeTimeout = (settings.chargeTimeout + 1) % N_TIMEOUTS;
+  if (row == SET_AC) settings.acTimeout = (settings.acTimeout + 1) % N_TIMEOUTS;
+  if (row == SET_FLIP) {
+    settings.flip = !settings.flip;
+    applyFlip();
+  }
+  saveSettings();
+  Serial.printf("[ui] timeout %s, charging %s, AC on %s, flip %s\n", TIMEOUTS[settings.timeout].label,
+                TIMEOUTS[settings.chargeTimeout].label, TIMEOUTS[settings.acTimeout].label, settings.flip ? "on" : "off");
+  requestRender();
+}
+
+static bool haveStation() {
+  Lock l;
+  return current.valid();
+}
+
+static void openPicker() {
+  settingsOpen = false;
+  pickerOpen = true;  // show it now; the Bluetooth task catches up
+  {
+    Lock l;
+    cursorMoved = false;
+  }
+  // A connect attempt can take 10 s to time out: cancel it rather than wait.
+  if (state == State::Connect) ble_gap_conn_cancel();
+  send(Cmd::OpenPicker);
+  requestRender();
+}
+
+static void handleInput(const Input &in) {
+  if (in.kind == Input::None) return;
+  if (pickerOpen) {
+    if (in.kind == Input::Choose) {
+      {
+        Lock l;
+        cursor = in.index;
+        cursorMoved = true;
+      }
+      requestRender();  // the tapped row lights while it connects
+      send(Cmd::Choose, in.index);
+    } else if ((in.kind == Input::Menu || in.kind == Input::Left) && haveStation()) {
+      pickerOpen = false;  // back to the station, unchanged
+      send(Cmd::ClosePicker);
+      requestRender();
+    }
+    return;
+  }
+  if (settingsOpen) {
+    if (in.kind == Input::Right || in.kind == Input::Menu) openSettings(false);
+    else if (in.kind == Input::Setting) changeSetting(in.index);
+    return;
+  }
+  if (in.kind == Input::Left) openSettings(true);
+  else if (in.kind == Input::Right || in.kind == Input::Menu) openPicker();
+  else if (in.kind == Input::ToggleAC && state == State::Poll) {
+    Lock l;
+    if (!status.valid || status.acOn < 0) {
+      Serial.println("[ctrl] AC state unknown, ignoring tap");
+      return;
+    }
+    int was = status.acOn, target = was ? 0 : 1;
+    status.acOn = target;  // flip the button now; the Bluetooth task sends it
+    acPressed = false;
+    send(Cmd::ToggleAC, target, was);
+    requestRender();
+  }
+}
+
+static void bleTask(void *);
+
 void setup() {
+  // Backlight off first thing: until the panel has been initialised and drawn,
+  // anything it shows is noise or white. The first frame then fades in.
+  pinMode(6, OUTPUT);
+  digitalWrite(6, LOW);
+  dataLock = xSemaphoreCreateRecursiveMutex();
+  loadPreferred();
+  loadSettings();
+  bool lcdOk = lcd.start();  // clears the panel to black
+  lcd.setBrightness(0);
+  canvas.setPsram(true);  // 320x480x2 = 300 KB
+  canvas.setColorDepth(16);
+  canvas.createSprite(lcd.width(), lcd.height());
+  bool touchOk = touch.begin();
+  applyFlip();
+  loadFonts();
+  render();
+  xTaskCreatePinnedToCore(fadeTask, "fade", 3072, nullptr, 1, nullptr, 1);
+
+  // Give a serial monitor a moment to attach, now the screen is up.
   Serial.begin(115200);
   uint32_t t0 = millis();
   while (!Serial && millis() - t0 < 3000) delay(10);
   Serial.println("\nBLUETTI controller " FW_BUILD);
-  loadPreferred();
+  if (!lcdOk) Serial.println("[lcd] init failed");
+  if (!touchOk) Serial.println("[touch] FT6336 not found");
   if (current.valid())
     Serial.printf("preferred device: %s (%s)\n", current.addr.c_str(), current.name.c_str());
-
-  if (!lcd.start()) Serial.println("[lcd] init failed");
-  lcd.setBrightness(BRIGHT_ON);
-  canvas.setPsram(true);  // 320x480x2 = 300 KB
-  canvas.setColorDepth(16);
-  canvas.createSprite(lcd.width(), lcd.height());
-  if (!touch.begin()) Serial.println("[touch] FT6336 not found");
-  loadFonts();
-  render();
-  xTaskCreatePinnedToCore(fadeTask, "fade", 3072, nullptr, 1, nullptr, 1);
 
   pinMode(PIN_BOOT, INPUT_PULLUP);
   attachInterrupt(PIN_BOOT, onBoot, FALLING);
@@ -785,19 +1008,26 @@ void setup() {
   scan->setActiveScan(true);                          // names arrive in scan responses
   scan->setInterval(100);
   scan->setWindow(99);
+
+  cmdQueue = xQueueCreate(8, sizeof(Cmd));
+  // Core 0, beside the NimBLE host task. The handshake's ECDH and signature
+  // checks want a roomy stack.
+  xTaskCreatePinnedToCore(bleTask, "ble", 16 * 1024, nullptr, 1, nullptr, 0);
 }
 
 // Debug over serial: 'S' dumps the screen as raw RGB565, 'D' drops the BLE link,
 // 'P' + 3 digits previews a charge level (e.g. P042) until the next poll,
 // 'B' presses BOOT, 'F' forgets the saved device and reboots,
-// 'X' + 6 digits taps at x,y (e.g. X100080), 'W' swipes.
+// 'X' + 6 digits taps at x,y (e.g. X100080), 'W' swipes right (picker),
+// 'L' swipes left (settings).
 static void handleSerial() {
   while (Serial.available()) {
     int c = Serial.read();
     if (c == 'D' && client && client->isConnected()) client->disconnect();  // test reconnect UI
     if (c == 'B') bootSimulated = true;
-    if (c == 'W') {
-      simTouch = {TouchEvent::Swipe, (int16_t)(canvas.width() / 2), (int16_t)(canvas.height() / 2), millis()};
+    if (c == 'W' || c == 'L') {
+      simTouch = {TouchEvent::Swipe, (int16_t)(canvas.width() / 2), (int16_t)(canvas.height() / 2), millis(),
+                  (int16_t)(c == 'W' ? 100 : -100), 0};
       lastActivity = millis();
       simTouchPending = true;
     }
@@ -806,9 +1036,31 @@ static void handleSerial() {
       if (Serial.readBytes(d, 6) == 6) {
         int y = atoi(d + 3);
         d[3] = 0;
-        simTouch = {TouchEvent::Tap, (int16_t)atoi(d), (int16_t)y, millis()};
+        simTouch = {TouchEvent::Tap, (int16_t)atoi(d), (int16_t)y, millis(), 0, 0};
         lastActivity = millis();
         simTouchPending = true;
+      }
+    }
+    if (c == 'T') {  // 'T0' / 'T1': show sample readings, discharging / charging
+      int ch = Serial.read();
+      Lock l;
+      status.valid = true;
+      status.soc = 64;
+      status.acOn = 0;
+      status.dcOn = 1;
+      bool charging = ch == '1';
+      status.minutes = charging ? 324 : 20160;
+      status.acIn = charging ? 412 : 0;
+      status.dcIn = 0;
+      status.dcOut = 18;
+      status.acOut = 0;
+      connMsg = "Connected";  // draw them as live
+      requestRender();
+    }
+    if (c == 'I') {  // list devices on the I2C bus
+      for (uint8_t a = 1; a < 127; a++) {
+        Wire.beginTransmission(a);
+        if (Wire.endTransmission() == 0) Serial.printf("[i2c] device at 0x%02x\n", a);
       }
     }
     if (c == 'F') {
@@ -820,8 +1072,9 @@ static void handleSerial() {
     if (c == 'P') {
       char d[4] = {0};
       if (Serial.readBytes(d, 3) == 3) {
+        Lock l;
         status.soc = atoi(d);
-        render();
+        requestRender();
       }
     }
     if (c != 'S') continue;
@@ -839,9 +1092,13 @@ static void handleSerial() {
   }
 }
 
-void loop() {
-  handleSerial();
-  updateScreen();
+// ---- Bluetooth task (core 0) ----
+static void bleStep() {
+  Cmd cmd;
+  if (xQueueReceive(cmdQueue, &cmd, 0) == pdTRUE) {
+    handleCmd(cmd);
+    return;
+  }
   switch (state) {
     case State::Scan: {
       if (!NimBLEDevice::getScan()->isScanning()) {
@@ -849,63 +1106,49 @@ void loop() {
         startScan();
       }
       drainAdverts();
-      if (takeInput().kind == Input::Menu) {
-        enterSelect(true);
-        break;
+      int i;
+      Device d;
+      {
+        Lock l;
+        i = current.valid() ? findDevice(current.addr) : -1;
+        if (i >= 0) d = found[i];
       }
-      int i = current.valid() ? findDevice(current.addr) : -1;
       if (i >= 0) {
         // The saved (or last used) station is in range: always prefer it.
-        Device d = found[i];
         if (!d.name.length()) d.name = current.name;
         choose(d, false);
       } else if (!current.valid() && millis() - scanStarted > SCAN_DECIDE_MS) {
         // Nothing chosen yet: use the only station around, or let the user pick.
-        if (found.size() == 1) choose(found[0], false);
-        else if (found.size() > 1) enterSelect(false);
+        size_t n;
+        {
+          Lock l;
+          n = found.size();
+          if (n == 1) d = found[0];
+        }
+        if (n == 1) choose(d, false);
+        else if (n > 1) enterSelect(false);
       }
-      delay(20);
+      waitForCmd(20);
       break;
     }
 
-    case State::Select: {
-      bool changed = drainAdverts();
-      Input in = takeInput();
-      if (in.kind == Input::Menu) {  // swipe or BOOT: back, unchanged
-        if (current.valid()) {
-          leaveSelect();
-          break;
-        }
-      }
-      if (in.kind == Input::Choose && in.index < (int)found.size()) {
-        cursor = in.index;
-        cursorMoved = true;
-        render();  // show the tapped row highlighted while connecting
-        choose(found[in.index], true);
-        break;
-      }
-      if (changed) render();
-      delay(20);
+    case State::Select:
+      if (drainAdverts()) requestRender();
+      waitForCmd(20);
       break;
-    }
 
     case State::Connect:
-      discardInput();
       if (doConnect()) {
         Serial.println("[ble] waiting for handshake");
         setConn("Handshake...");
         setState(State::Handshake);
       } else {
-        delay(2000);
-        setState(State::Scan);
+        waitForCmd(2000);  // a command (e.g. the picker opening) cuts this short
+        if (state == State::Connect) setState(State::Scan);
       }
       break;
 
     case State::Handshake: {
-      if (takeInput().kind == Input::Menu) {
-        enterSelect(true);
-        break;
-      }
       Bytes ignored;
       pumpRx(ignored);
       if (!client->isConnected()) {
@@ -920,34 +1163,45 @@ void loop() {
         dropLink();
         setState(State::Scan);
       }
-      delay(5);
+      waitForCmd(5);
       break;
     }
 
-    case State::Poll: {
+    case State::Poll:
       if (!client->isConnected()) {
         Serial.println("[ble] disconnected");
         setConn("Disconnected");
         setState(State::Scan);
         break;
       }
-      Input in = takeInput();
-      if (in.kind == Input::Menu) {
-        enterSelect(true);
-        break;
-      }
-      if (in.kind == Input::ToggleAC) toggleAC();
-      pressTick();
-      sweepTick();
       if (lastPoll == 0 || millis() - lastPoll >= POLL_INTERVAL_MS) {
         lastPoll = millis();
         poll();
       }
-      for (int i = 0; i < 4; i++) {  // 20 ms, watching for a press
-        pressTick();
-        delay(5);
-      }
+      waitForCmd(20);
       break;
-    }
   }
+}
+
+static void bleTask(void *) {
+  for (;;) bleStep();
+}
+
+// ---- UI (loop(), core 1) ----
+void loop() {
+  handleSerial();
+  updateScreen();
+  handleInput(takeInput());
+  pressTick();
+  if (needSweep) {
+    needSweep = false;
+    if (screenOn && !settingsOpen && !pickerOpen) startSweep();
+  }
+  sweepTick();
+  if (needRender) {
+    needRender = false;
+    Lock l;
+    render();
+  }
+  delay(10);
 }

@@ -2,7 +2,8 @@
 // long-press / swipe events. A small task polls the controller (its INT line goes
 // to the I/O expander, not a GPIO), so touches aren't lost while loop() is blocked
 // in a BLE transaction. Registers from 0x02: finger count, then the first
-// finger's x / y; coordinates already match the portrait screen.
+// finger's x / y; coordinates already match the portrait screen, and setFlip()
+// turns them round for a panel rotated 180 degrees.
 #pragma once
 
 #include <Arduino.h>
@@ -10,8 +11,9 @@
 
 struct TouchEvent {
   enum Kind : uint8_t { Tap, Long, Swipe } kind;
-  int16_t x, y;
+  int16_t x, y;   // where the finger landed
   uint32_t down;  // millis() when the finger touched down
+  int16_t dx, dy;  // Swipe: how far it had moved when it became one
 };
 
 class Touch {
@@ -20,6 +22,7 @@ class Touch {
   static const uint32_t LONG_MS = 800;
   static const uint32_t LIFT_MS = 60;  // no reports for this long = finger lifted
   static const int MOVE_PX = 40;  // more movement than this is a swipe, not a tap
+  static const int16_t W = 320, H = 480;
 
   // Wire must already be running; the controller is reset along with the display.
   bool begin() {
@@ -29,6 +32,9 @@ class Touch {
     xTaskCreatePinnedToCore(task, "touch", 3072, this, 2, nullptr, 1);
     return ok;
   }
+
+  // Report coordinates for a screen turned upside down (rotation 2).
+  void setFlip(bool f) { flip_ = f; }
 
   bool take(TouchEvent &e) { return xQueueReceive(queue_, &e, 0) == pdTRUE; }
   void clear() { xQueueReset(queue_); }
@@ -47,6 +53,7 @@ class Touch {
 
  private:
   QueueHandle_t queue_ = nullptr;
+  volatile bool flip_ = false;
   volatile uint32_t lastDown_ = 0;
   volatile bool held_ = false;
   volatile int16_t heldX_ = 0, heldY_ = 0;
@@ -63,11 +70,15 @@ class Touch {
     if (n == 0 || n > 2) return false;
     x = ((buf[1] & 0x0F) << 8) | buf[2];
     y = ((buf[3] & 0x0F) << 8) | buf[4];
+    if (flip_) {
+      x = W - 1 - x;
+      y = H - 1 - y;
+    }
     return true;
   }
 
-  void send(TouchEvent::Kind k, int16_t x, int16_t y, uint32_t down) {
-    TouchEvent e{k, x, y, down};
+  void send(TouchEvent::Kind k, int16_t x, int16_t y, uint32_t down, int16_t dx = 0, int16_t dy = 0) {
+    TouchEvent e{k, x, y, down, dx, dy};
     xQueueSend(queue_, &e, 0);
   }
 
@@ -93,7 +104,7 @@ class Touch {
       } else if (touching && down && !done) {
         if (abs(x - x0) > MOVE_PX || abs(y - y0) > MOVE_PX) {
           self->held_ = false;
-          self->send(TouchEvent::Swipe, x0, y0, t0);
+          self->send(TouchEvent::Swipe, x0, y0, t0, x - x0, y - y0);
           done = true;
         } else if (now - t0 >= LONG_MS) {
           self->held_ = false;

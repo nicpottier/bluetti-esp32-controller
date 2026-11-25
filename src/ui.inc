@@ -1,7 +1,8 @@
 // UI for the 320x480 portrait LCD. Included from main.cpp.
 // Layout follows tools/mock_rect.py: a segmented charge bar across the top, charge
 // and time remaining in the middle, inputs, then AC / DC output buttons (tap AC to
-// toggle it) and a status bar at the bottom. The picker lists stations as rows.
+// toggle it) and a status bar at the bottom. The picker lists stations as rows,
+// and the settings page lists settings the same way.
 #include "fonts.h"
 
 // Palette: LCARS layout with a modern flat colour set. RGB565 via rgb().
@@ -165,6 +166,10 @@ static void startSweep() { sweepStart = millis() ? millis() : 1; }
 // Advance the sweep, redrawing only the top strip of the screen. Call often.
 static void sweepTick() {
   if (!sweepStart) return;
+  if (settingsOpen || pickerOpen) {  // the bar isn't on screen
+    sweepStart = 0;
+    return;
+  }
   float head = float(millis() - sweepStart) / SWEEP_SEG_MS - 2;
   int lit = max(1, sweepSoc * GAUGE_SEGS / 100);
   bool done = head > lit + 2.5f;
@@ -234,9 +239,10 @@ static void renderStatus() {
   gauge(valid ? status.soc : 0, accent);
   sweepSoc = valid ? status.soc : 0;
   sweepColor = accent;
-  sweepBack = valid && status.acIn + status.dcIn <= status.acOut + status.dcOut;  // idle drains too
+  bool charging = valid && status.acIn + status.dcIn > status.acOut + status.dcOut;
+  sweepBack = valid && !charging;  // idle drains too
 
-  // Charge, with time remaining centred below it.
+  // Charge, with the time to full (charging) or to empty below it.
   const int cb = 196;
   String pct = valid ? String(status.soc) : String("--");
   int sw = textW(pct, fSoc), pw = textW("%", fPct);
@@ -247,10 +253,14 @@ static void renderStatus() {
     String tv, tu;
     remainingParts(status.minutes, tv, tu);
     tu.toUpperCase();
+    String what = charging ? "TO FULL" : "TO EMPTY";
     int vw = textW(tv, fTime), uw = textW(tu, f22);
-    x = CX - (vw + 8 + uw) / 2;
+    // The unit with the direction under it, beside the number: "5.4 HOURS / TO FULL".
+    int ww = textW(what, f22), stackW = max(uw, ww);
+    x = CX - (vw + 9 + stackW) / 2;
     text(tv, x, cb + 50, fTime, value, baseline_left);
-    text(tu, x + vw + 8, cb + 50, f22, accent, baseline_left);
+    text(tu, x + vw + 9, cb + 50 - 21, f22, accent, baseline_left);
+    text(what, x + vw + 9, cb + 50, f22, value, baseline_left);
   }
 
   // Inputs
@@ -299,14 +309,47 @@ static void renderSelect() {
   canvas.pushSprite(0, 0);
 }
 
+// ---- settings page: one row per setting; tap a row to step its value ----
+enum { SET_TIMEOUT, SET_CHARGE, SET_AC, SET_FLIP, SET_ROWS };
+
+static void renderSettings() {
+  canvas.fillScreen(TFT_BLACK);
+  box(MARGIN, 10, W - MARGIN, 36, RADIUS, L_FRAME);
+  text("SETTINGS", 26, 30, fHdr, TFT_BLACK, baseline_left);
+  text("V" FW_VERSION, W - MARGIN - 16, 30, fHdr, TFT_BLACK, baseline_right);
+  const char *labels[SET_ROWS] = {"SCREEN TIMEOUT", "TIMEOUT WHILE CHARGING", "TIMEOUT WHILE AC IS ON",
+                                  "ORIENTATION"};
+  const char *values[SET_ROWS] = {TIMEOUTS[settings.timeout].label, TIMEOUTS[settings.chargeTimeout].label,
+                                  TIMEOUTS[settings.acTimeout].label, settings.flip ? "FLIPPED" : "NORMAL"};
+  for (int r = 0; r < SET_ROWS; r++) {
+    int y = ROW_Y0 + r * ROW_STEP;
+    box(MARGIN, y, W - MARGIN, y + ROW_H, RADIUS, L_EMPTY);
+    box(MARGIN, y, MARGIN + 12, y + ROW_H, RADIUS, L_FRAME, RC_LEFT);  // LCARS cap
+    text(labels[r], 32, y + 30, f18, L_LABEL, baseline_left);
+    text(values[r], 32, y + 70, fModel, L_TEXT, baseline_left);
+  }
+  statusBar("TAP TO CHANGE", "SWIPE RIGHT TO RETURN", L_BAR);
+  canvas.pushSprite(0, 0);
+}
+
 static void render() {
-  if (state == State::Select) renderSelect();
+  if (pickerOpen) renderSelect();
+  else if (settingsOpen) renderSettings();
   else renderStatus();
 }
 
 // ---- touch targets (screen coordinates) ----
 static bool hitAC(int x, int y) {
   return x < CX && y >= BTN_Y0 - 6 && y < BTN_Y1 + 6;
+}
+
+// Settings row under (x, y), or -1.
+static int hitSetting(int x, int y) {
+  for (int r = 0; r < SET_ROWS; r++) {
+    int y0 = ROW_Y0 + r * ROW_STEP;
+    if (y >= y0 - 4 && y < y0 + ROW_H + 4) return r;
+  }
+  return -1;
 }
 
 // Picker row under (x, y), or -1.
